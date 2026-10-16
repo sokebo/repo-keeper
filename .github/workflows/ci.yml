@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 最小权限：只需要读代码
+permissions:
+  contents: read
+
+jobs:
+  # ── 密钥泄漏扫描 ─────────────────────────────────
+  #
+  # 为什么不用 gitleaks/gitleaks-action@v2：
+  # 那个 action 从 v2 起是**商业许可**，扫组织仓需要 license key
+  # （免费 Starter 只覆盖 1 个仓，且要填公司信息申请）。
+  # 本仓在 sokebo org 下，所以直接跑 gitleaks 本体 ——
+  # 它是 MIT 开源的，功能一样，只是没有 PR 自动评论。
+  #
+  # 扫的是**完整历史**，不是只看最新 commit：
+  # 密钥一旦进过历史，删文件也没用。checkout 必须 fetch-depth: 0。
+  gitleaks:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          # 钉版本。gitleaks 升级偶尔会改默认规则集，
+          # 不钉的话某天早上 CI 会因为一条新规则突然变红。
+          VERSION=8.30.1
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Scan history
+        # --redact：万一真扫到东西，日志里只显示 ***，不把密钥再泄一次
+        run: gitleaks detect --source . --redact --verbose
+
+  # ── 脚本冒烟 ─────────────────────────────────────
+  #
+  # 目前仓库里唯一能跑的是 measure_repo.py。
+  # 30 秒能跑完，但能挡住"语法写错了"和"参数处理崩了"这两类最常见的低级错。
+  # （之前 --help 就不认，被当成账号名去查权限了。）
+  scripts:
+    name: script smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax check
+        run: python3 -m py_compile scripts/measure_repo.py
+
+      - name: --help must not touch the network
+        # 用一个必然失败的 GH 环境，逼出「help 分支忘了提前 return」这类问题
+        env:
+          GH_TOKEN: definitely-not-a-real-token
+          GH_HOST: 127.0.0.1:1
+        run: |
+          out=$(python3 scripts/measure_repo.py --help)
+          echo "$out"
+          if echo "$out" | grep -qi "token 身份"; then
+            echo "::error::--help 仍然在连 API。用法输出应该完全离线。"
+            exit 1
+          fi
